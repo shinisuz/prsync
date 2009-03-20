@@ -1,0 +1,117 @@
+#!/opt/local/bin/perl -w
+=head1 NAME
+
+Parallel Rsync Client
+
+=head1 SYNOPSIS
+
+# file
+$ prsync /home/data/hoge.xml
+
+# directory
+$ prsync /home/data
+
+# specify servergroup. where not set, use 'default.conf' if exists
+$ prsync -s www /home/data
+
+# verbose mode
+$ prsync -v /home/data
+
+=head1 DESCRIPTION
+
+A Simple SCP Client using Parallel::ForkManager.
+You can user command line options same as scp.
+
+=cut
+
+use strict;
+use warnings;
+use Parallel::ForkManager;
+use Getopt::Long;
+use Cwd 'realpath';
+use File::Spec;
+{
+    my $max_processes   = 30;
+    my $rsync           = `which rsync`;
+    my $group           = 'default';
+    my $distination     = '';
+    my $conf            = "$ENV{HOME}/pscp";
+    my $verbose         = 0;
+    my $usage           = "usage: prsync [-s (group)] [-v] [-delete]";
+    my $delete          = "";
+    
+    #---------------------------------------
+    # get option
+    #---------------------------------------
+    chomp $rsync;
+    GetOptions(
+        '-s=s'    => \$group,
+        '-v'      => \$verbose,
+        '-d=s'    => \$distination,
+        '-delete' => \$delete
+    );
+    if( !$ARGV[0] ){
+        die $usage;
+    }
+
+    #---------------------------------------
+    # get realpath
+    #---------------------------------------
+    my $local = Cwd::realpath( $ARGV[0] );
+    my ($vol,$dist,$file) = File::Spec->splitpath($local);
+    my $isDir = ( -d $local ) ? '-r' : '';
+    my $groupConf = "$conf/$group.conf";
+    -f $groupConf or die "$groupConf not found";
+    
+    if( $distination ){
+        $dist = $distination;
+    }
+    if( $delete ) {
+        $delete = "--delete";
+    }
+
+    #---------------------------------------
+    # read servergroup conf
+    #---------------------------------------
+    my @hosts = ();
+    open (HOSTS, "$conf/$group.conf") or die "$!";
+    while (<HOSTS>) {
+        chomp;    
+        push @hosts, $_;
+    }
+    close (HOSTS);
+    
+    #---------------------------------------
+    # exec parallel
+    #---------------------------------------
+    my $pm = new Parallel::ForkManager($max_processes);
+    my $retcode = 0;
+
+    $pm->run_on_finish( sub {
+        my ($pid, $exit_code, $ident) = @_;
+        if( $exit_code == 0 ){ 
+            print "[OK] $ident\n";
+        } else {
+            if( $retcode == 0 ){ $retcode = 1; }
+            print "[NG] $ident(code=$exit_code)\n";
+        }
+    });
+
+    foreach my $host (@hosts) {
+
+        # Forks and returns the pid for the child:
+        my $pid = $pm->start($host) and next; 
+    
+        # Verbose Mode
+        my $v = ( $verbose ) ? "-v" : "";
+        my $r = system "$rsync -az $v $delete -e 'ssh -o StrictHostKeyChecking=no' $local $host:$dist";
+        if( $r != 0 ){ exit 1 }; 
+        # Terminates the child process
+        $pm->finish;
+    }
+    $pm->wait_all_children;
+    #---------------------------------------
+    # end
+    #---------------------------------------
+    exit $retcode;
+}
